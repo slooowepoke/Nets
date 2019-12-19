@@ -1,1 +1,0 @@
-/usr/bin/c++  -g    -static CMakeFiles/serverTCP.dir/main.cpp.o  -o serverTCP -lpthread 

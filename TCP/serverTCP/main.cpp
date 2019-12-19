@@ -11,13 +11,24 @@
 #include "etcp.h"
 #include <cerrno>
 #include <algorithm>
+#include <inttypes.h>
+#include "rio.h"
 
+#define BUF_SIZE 256
 #define NUMBER_OF_READN_SYMBOLS 256
 #define NUMBER_OF_CLIENTS 5
 #define PORT 7777
+#define MAX_VAL 0xFFFFFFFF
+
+#define CURRENT_SIMPLES "current-simples.txt"
+#define LAST_MAX_CNT 100
+
+std::mutex myMutex, currentNMutex, bufferMutex, fileMutex;
 
 
-std::mutex myMutex;
+uint32_t buffer[LAST_MAX_CNT];
+int buffer_cnt = 0;
+int buffer_start = 0;
 
 struct socketContainer {
     char *addr;
@@ -28,7 +39,8 @@ struct socketContainer {
 
 std::vector<socketContainer> arrayOfConnection;
 
-int currentN = 1;
+uint32_t currentN = 1;
+uint32_t delta = 10000;
 
 typedef struct {
     int accept_socket;
@@ -42,165 +54,129 @@ void closeSocket(int socket) {
     close(socket);
 }
 
-void writeError(SOCKET fd, char *errorMsg) {
-    char buf[NUMBER_OF_READN_SYMBOLS];
+void writeError(SOCKET fd, const char *errorMsg) {
+    char buf[BUF_SIZE];
     sprintf(buf, "400 ERROR %s\n", errorMsg);
-    if (send(fd, buf, strlen(buf), 0) < 0) {
+    if (snd_msg(fd, buf, strlen(buf)) < 0) {
         perror("ERROR reading from socket");
         closeSocket(fd);
     }
 }
 
-void writeSuccess(SOCKET fd) {
-    char buf[NUMBER_OF_READN_SYMBOLS];
-    sprintf(buf, "200 SUCCESS\n");
-    if (send(fd, buf, strlen(buf), 0) < 0) {
-        perror("ERROR reading from socket");
+/*void writeSuccess(SOCKET fd) {
+    const char *msg = "200 SUCCESS\n";
+    if (snd_msg(fd, msg, strlen(msg)) == -1) {
+        perror("snd_msg failed");
         closeSocket(fd);
     }
-}
-
-int readN(SOCKET fd, char *bp, size_t len) {
-    int cnt;
-    int rc;
-
-    cnt = len;
-    while (cnt > 0) {
-        rc = recv(fd, bp, cnt, 0);
-
-        if (rc < 0) {
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        if (rc == 0)
-            return len - cnt;
-        bp += rc;
-        cnt -= rc;
-    }
-    return len;
-}
-
-int getAmountNumbers() {
-    int amount = 0;
-    FILE *file = fopen("/home/natalia/CLionProjects/serverTCP/current-simples.txt", "a+");
-    fseek(file, 0, SEEK_SET);
-    while (!feof(file)) {
-        if (getc(file) == ' ') {
-            amount++;
-        }
-    }
-    amount++;
-    fclose(file);
-    return amount;
-}
-
-
-char *findLastNSimples(int n) {
-    if (n <= getAmountNumbers()) {
-        FILE *file = fopen("/home/natalia/CLionProjects/serverTCP/current-simples.txt", "a+");
-        fseek(file, 0, SEEK_END);
-        fseek(file, -1, SEEK_CUR);
-        int count = 0;
-        int symbols = 0;
-        while (true) {
-            fseek(file, -1, SEEK_CUR);
-            char l = (char) fgetc(file);
-            symbols++;
-            fseek(file, -1, SEEK_CUR);
-            if (l == ' ') {
-                count++;
-            }
-            if (count == n && file == SEEK_SET) {
-                count++;
-                break;
-            }
-            if (count == n) {
-                break;
-            }
-        }
-        char *result = (char *) calloc(count, sizeof(char));
-        bzero(result, n * symbols + 1);
-        fgets(result, n * symbols + 1, file);
-        fclose(file);
-        return result;
-    } else {
-        return "Can't read so many simples";
-    }
-}
+}*/
 
 //Функция для обработки клиента в отдельном потоке
 void *threadFunction(void *threadData) {
     auto data = (socketContainer *) threadData;
     socketContainer s1 = *data;
-    char result[NUMBER_OF_READN_SYMBOLS]; //Клиентское сообщение
-    //char response[21] = "OK, I've got message";
-    memset(result, '\0', 256);
+    char *result; //Клиентское сообщение
+    uint32_t cnt;
     while (true) {
-        if (readN(s1.socket, result, NUMBER_OF_READN_SYMBOLS) < 0) {
+        result = NULL;
+        int failedOrNot = rcv_msg(s1.socket, (void**)&result, &cnt);
+        if (failedOrNot < 0) {
             perror("ERROR reading from socket");
             break;
-        };
+        }
+        if (failedOrNot == 0) {
+            break;
+        }
         if (strstr(result, "count") != nullptr) {
-            writeSuccess(s1.socket);
+            //writeSuccess(s1.socket);
             FILE *file;
             printf("Client %d send message %s", s1.socket, result);
-            bzero(result, NUMBER_OF_READN_SYMBOLS);
-            char curN[10];
-            sprintf(curN, "%d", currentN);
-            if (write(s1.socket, curN, strlen(curN)) <= 0) {
+            uint32_t _from, _to, val;
+            
+            currentNMutex.lock();
+            _from = currentN;
+            _to = _from + delta - 1;
+            currentN = _to + 1;
+            currentNMutex.unlock();
+            
+            
+            if (snd_number_u(s1.socket, _from) < 0) {
                 perror("ERROR sending to socket");
                 break;
-            };
-
-            file = fopen("/home/natalia/CLionProjects/serverTCP/current-simples.txt", "a+");
-            if (read(s1.socket, result, NUMBER_OF_READN_SYMBOLS) < 0) {
-                perror("ERROR reading from socket");
+            }
+            if (snd_number_u(s1.socket, _to) < 0) {
+                perror("ERROR sending to socket");
                 break;
             }
-            fprintf(file, "%s", result);
-            fclose(file);
-            char *last = findLastNSimples(1);
-            currentN = atoi(last) + 1;
-            free(last);
-            bzero(result, NUMBER_OF_READN_SYMBOLS);
-        } else if (strstr(result, "last")) {
-            writeSuccess(s1.socket);
-            sprintf(result, "%s", "How much?");
-            if (write(s1.socket, result, NUMBER_OF_READN_SYMBOLS) < 0) {
-                perror("ERROR reading from socket");
+            bool goout = false;
+            while (1) {
+                if (rcv_number_u(s1.socket, &val) <= 0) {
+                    perror("ERROR reading from socket");
+                    goout = true;
+                    break;
+                }
+                if (val == MAX_VAL) {
+                    break;
+                }
+                fileMutex.lock();
+                file = fopen(CURRENT_SIMPLES, "a+");
+                fprintf(file, "%" PRIu32 " ", val);
+                fclose(file);
+                fileMutex.unlock();
+                bufferMutex.lock();
+                if (buffer_cnt >= LAST_MAX_CNT) {
+                    buffer[buffer_start] = val;
+                    buffer_start = (buffer_start + 1) % LAST_MAX_CNT;
+                } else {
+                    buffer[buffer_cnt] = val;
+                    buffer_cnt++;
+                }
+                bufferMutex.unlock();
+            }
+            if (goout) {
                 break;
-            };
-            bzero(result, NUMBER_OF_READN_SYMBOLS);
-            if (readN(s1.socket, result, NUMBER_OF_READN_SYMBOLS) < 0) {
-                perror("ERROR reading from socket");
-                break;
-            };
-            int n = atoi(result);
-            if (n <= getAmountNumbers()) {
-                writeSuccess(s1.socket);
-                bzero(result, NUMBER_OF_READN_SYMBOLS);
-                char *res = findLastNSimples(n);
-                sprintf(result, res);
-                if (write(s1.socket, result, NUMBER_OF_READN_SYMBOLS) < 0) {
+            }
+        } else if (strstr(result, "last") || strstr(result, "MAX") || (strstr(result, "max"))) {
+            //writeSuccess(s1.socket);
+            uint32_t cnt = 1;
+            if (strstr(result, "last")) {
+                if (rcv_number_u(s1.socket, &cnt) <= 0) {
                     perror("ERROR reading from socket");
                     break;
-                };
-                bzero(result, NUMBER_OF_READN_SYMBOLS);
-            } else {
-                writeError(s1.socket, "Can't read so many simples");
+                }
             }
-
-        } else if (strstr(result, "MAX") || (strstr(result, "max"))){
-            writeSuccess(s1.socket);
-            sprintf(result, "MAX NUMBER IS %d", currentN - 1);
-            if (write(s1.socket, result, NUMBER_OF_READN_SYMBOLS) < 0) {
-                perror("ERROR reading from socket");
+            bufferMutex.lock();
+            if (cnt > buffer_cnt) {
+                cnt = buffer_cnt;
+            }
+            int ind = (buffer_start + buffer_cnt - 1) % LAST_MAX_CNT;
+            bool goout = false;
+            while (cnt > 0) {
+                if (snd_number_u(s1.socket, buffer[ind]) < 0) {
+                    perror("failed to send");
+                    goout = true;
+                    break;
+                }
+                ind--;
+                if (ind < 0) {
+                    ind = LAST_MAX_CNT - 1;
+                }
+                cnt--;
+            }
+            bufferMutex.unlock();
+            if (goout) {
                 break;
-            };
-            bzero(result, NUMBER_OF_READN_SYMBOLS);
-        } else if (strlen(result)) {
+            }
+            uint32_t val = MAX_VAL;
+            if (snd_number_u(s1.socket, val) < 0) {
+                perror("failed to send");
+                break;
+            }
+        } else {
             writeError(s1.socket, "Incorrect command");
+        }
+        if (result) {
+            free(result);
         }
     }
 
@@ -236,7 +212,7 @@ void *acceptThread(void *threadData) {
             newSock.socket = client_socket;
             arrayOfConnection.push_back(newSock);
             myMutex.unlock();
-            n = pthread_create(&thread, nullptr, threadFunction, &newSock);
+            n = pthread_create(&thread, nullptr, threadFunction, &(arrayOfConnection[arrayOfConnection.size() - 1]));
             if (n != 0) {
                 printf("ERROR creating client's thread");
                 break;
@@ -252,7 +228,11 @@ void *acceptThread(void *threadData) {
 
 int main() {
 
-    FILE *file = fopen("/home/natalia/CLionProjects/serverTCP/current-simples.txt", "w+");
+    FILE *file = fopen(CURRENT_SIMPLES, "w+");
+    if (!file) {
+        perror("fopen failed");
+        exit(EXIT_FAILURE);
+    }
     fclose(file);
 
     std::string userCommand;
@@ -265,12 +245,15 @@ int main() {
     auto threadData = (pthrData *) malloc(sizeof(pthrData));
 
     threadData->accept_socket = socket(AF_INET, SOCK_STREAM, 0);
+    int val = 1;
+    if (setsockopt(threadData->accept_socket, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int)) == -1) {
+        perror("setsockopt failed");
+        exit(EXIT_FAILURE);
+    }
     if (bind(threadData->accept_socket, (struct sockaddr *) &local, sizeof(local)) < 0) {
         printf("ERROR: port is busy");
         exit(1);
-    };
-
-
+    }
     std::cout << "Server binding to port : " << PORT << std::endl;
 
     auto thread = (pthread_t *) malloc(sizeof(pthread_t));
@@ -290,6 +273,13 @@ int main() {
         } else if (userCommand == "exit") {
             printf("exit\n");
             break;
+        } else if (userCommand == "delta") {
+            int newDelta;
+            std::cin >> newDelta;
+            currentNMutex.lock();
+            delta = newDelta;
+            currentNMutex.unlock();
+            printf("Delta changed to %" PRIu32 "\n", delta);
         } else if (userCommand == "kill") {
             if (arrayOfConnection.empty()) {
                 std::cout << "No open connections" << std::endl;

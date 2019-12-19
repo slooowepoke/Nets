@@ -1,3 +1,0 @@
-/home/natalia/CLionProjects/serverTCP/cmake-build-debug/CMakeFiles/rebuild_cache.dir
-/home/natalia/CLionProjects/serverTCP/cmake-build-debug/CMakeFiles/serverTCP.dir
-/home/natalia/CLionProjects/serverTCP/cmake-build-debug/CMakeFiles/edit_cache.dir

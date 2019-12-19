@@ -3,51 +3,49 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <strings.h>
+#include <stdlib.h>
+#include <inttypes.h>
 #include "etcp.h"
 #include "strnstr.c"
+#include "rio.h"
 
+#define MAX_VAL 0xFFFFFFFF
 
 const int BUF_SIZE = 256;
-const int CHECK_COUNT = 100;
 
-char* itoaa(int num, char *str, int radix)
-{
-    if(str == NULL)
-    {
-        return NULL;
-    }
-    sprintf(str, "%d", num);
-    return str;
-}
-
-int getSimpleNum(int from, int *resultArray) {
-
-    int t, i, count = 0, flag;
-    if (from <= 0) {
-        return -1;
-    } else {
-        for (t = from; t <= (CHECK_COUNT + from); t++) {
-            flag = 1;
-            for (i = 2; i * i <= t; i++) {
-                if (t % i == 0) {
-                    flag = 0;
-                    break;
-                }
-            }
-            if (flag) {
-                resultArray[count] = t;
-                count++;
+void simpleNumbers(int fd, uint32_t _from, uint32_t _to) {
+    uint32_t t, i;
+    int flag;
+    for (t = _from; t <= _to; t++) {
+        flag = 1;
+        for (i = 2; i * i <= t; i++) {
+            if (t % i == 0) {
+                flag = 0;
+                break;
             }
         }
+        if (flag) {
+            snd_number_u(fd, t);
+            printf("%" PRIu32 " ", t);
+        }
     }
-    return count;
+    t = MAX_VAL;
+    snd_number_u(fd, t);
+    printf("\n");
 }
 
-void checkSuccess(int s, char *buf) {
-    if (recv(s, buf, BUF_SIZE, 0) < 0) {
+int checkSuccess(int fd) {
+    char *buf;
+    uint32_t cnt;
+    if (rcv_msg(fd, (void**)&buf, &cnt) < 0) {
         printf("Error on receiving message");
+        exit(EXIT_FAILURE);
     }
+    int code = atoi(buf);
     printf("%s", buf);
+    free(buf);
+    return code;
 }
 
 int main() {
@@ -57,6 +55,8 @@ int main() {
     char buf[BUF_SIZE];
     int port = 7500;
     char addr[15] = "127.0.0.1";
+    char *buf2;
+    uint32_t cnt2;
 
     printf("Enter the port:\n");
     scanf("%d", &port);
@@ -83,66 +83,54 @@ int main() {
     }
     fgets(buf, sizeof(buf) - 1, stdin);
     while (1) {
-        bzero(buf, sizeof(buf));
         printf("\nPlease enter the message: ");
         fgets(buf, sizeof(buf) - 1, stdin);
-        if (strlen(buf) > 1) { // проверка на то, чтоб сообщение было не пустым
-            if (write(s, buf, BUF_SIZE) <= 0) {
-                printf("Error on sending message");
-                break;
-            };
-
-            if (strnstr(buf, "count", 5) != NULL) {
-                checkSuccess(s, buf);
-                if (strstr(buf, "400") != NULL) {
-                    bzero(buf, BUF_SIZE);
-                } else {
-                    bzero(buf, BUF_SIZE);
-
-                    if (read(s, buf, BUF_SIZE) <= 0) {
-                        printf("Error on receiving message");
-                        break;
-                    };
-                    printf("%s\n", buf);
-
-                    int arrayRes[CHECK_COUNT];
-                    int a = atoi(buf);
-                    int res = 0;
-                    res = getSimpleNum(a, arrayRes);
-                    char *resArr = (char *) calloc(res, sizeof(char));
-                    char* curI;
-                    if (res < 0) {
-                        return -1;
-                    } else {
-                        for (int i = 0; i < res; i++) {
-                            itoaa(arrayRes[i], curI, 10);
-                            strcat(resArr, curI);
-                            strcat(resArr, " ");
-                        }
-                    }
-                    if (write(s, resArr, strlen(resArr)) <= 0) {
-                        printf("Error on sending message");
-                        break;
-                    };
-
+        if (strlen(buf) <= 1) {
+            continue;
+        }
+        if (snd_msg(s, buf, strlen(buf)) < 0) {
+            printf("Error on sending message");
+            break;
+        }
+        if (strnstr(buf, "count", 5) != NULL) {
+            if (checkSuccess(s) != 400) {
+                uint32_t _from, _to;
+                if (rcv_number_u(s, &_from) <= 0) {
+                    printf("Error on receiving message or EOF");
+                    break;
                 }
-            } else {
-                checkSuccess(s, buf);
-                if (strnstr(buf, "400", 3) == NULL) {
-                    bzero(buf, BUF_SIZE);
-                    if (read(s, buf, BUF_SIZE) <= 0) {
-                        printf("Error on receiving message");
-                        break;
-                    };
-                    printf("%s\n", buf);
-                    bzero(buf, BUF_SIZE);
-                } else {
-                    bzero(buf, BUF_SIZE);
+                if (rcv_number_u(s, &_to) <= 0) {
+                    printf("Error on receiving message or EOF");
+                    break;
                 }
+                printf("From %" PRIu32 " to %" PRIu32 "\n", _from, _to);
+                simpleNumbers(s, _from, _to);
             }
         } else {
+            if (checkSuccess(s) != 400) {
+                uint32_t val;
+                if (strstr(buf, "last")) {
+                    printf("How much: ");
+                    scanf(" %" PRIu32, &val);
+                    char tmp[3];
+                    fgets(tmp, 3, stdin);
+                    if (snd_number_u(s, val) < 0) {
+                        break;
+                    }
+                }
+                while (1) {
+                    if (rcv_number_u(s, &val) <= 0) {
+                        printf("Error on receiving message");
+                        exit(EXIT_FAILURE);
+                    }
+                    if (val == MAX_VAL) {
+                        printf("\n");
+                        break;
+                    }
+                    printf("%" PRIu32 " ", val);
+                }
+            }
         }
-        bzero(buf, BUF_SIZE);
     }
 
     shutdown(s, 2);
